@@ -1,0 +1,12 @@
+{
+  "core": [
+    "penguin"
+  ],
+  "modifier": [
+    "angry"
+  ],
+  "accessory": [
+    "banana",
+    "ice"
+  ]
+}
