@@ -38,7 +38,7 @@ prompt = "black penguin in the mountains"
 # print("\n\n🏁 Best emoji combination:", chromosome)
 # print("\n\n")
 
-chromosome = ['🐧', '☄', '⛰', '⚫️']
+chromosome = ['🐧', '🧊', '⛰', '⚫️']
 background = "mountain"
 spatial_map = [('penguin', 'hold', 'ice')]
 role_map = {'core': ['penguin'], 'modifier': ['black'], 'accessory': ['ice']}

@@ -523,24 +523,35 @@ class EmojiCompositionEnv(gym.Env):
         emoji_idx = int(scaled * len(self.emoji_list))
         emoji_idx = min(emoji_idx, len(self.emoji_list) - 1)
 
-        # emoji_idx = int(np.clip(round(action[0]), 0, len(self.emoji_list) - 1))
+        scale_idx = int(np.clip(round(action[3]), 0, 2))
+
+        # 1. Normalize and interpret the action values
+        scaled = np.clip(action[0], 0.0, 1.0)
+        emoji_idx = int(scaled * len(self.emoji_list))
+        emoji_idx = min(emoji_idx, len(self.emoji_list) - 1)
+
         x_norm = np.clip(action[1], 0.0, 1.0)
         y_norm = np.clip(action[2], 0.0, 1.0)
         scale_idx = int(np.clip(round(action[3]), 0, 2))
         layer = int(np.clip(round(action[4]), 0, 3))
-        color_idx = int(np.clip(round(action[5]), 0, len(self.emoji_list)))  # +1 means "no coloring"
+        color_idx = int(np.clip(round(action[5]), 0, len(self.emoji_list)))
         crop_type = int(np.clip(round(action[6]), 0, 2))
+        stop_signal = float(action[7]) if len(action) > 7 else 0.0
 
-        # 1. Select the emoji
-        emoji = self.emoji_list[emoji_idx]
-
-        # 2. Decode position
-        x = int(x_norm * self.canvas_size[0])
-        y = int(y_norm * self.canvas_size[1])
-
-        # 3. Decode size
-        size_options = [32, 48, 64]  # Available sizes
+        # 2. Get size from scale index
+        size_options = [32, 48, 64]
         size = size_options[scale_idx]
+
+        # 3. Calculate max allowed positions to stay in canvas
+        max_x = self.canvas_size[0] - size
+        max_y = self.canvas_size[1] - size
+
+        # 4. Clamp position
+        x = int(np.clip(x_norm * self.canvas_size[0], 0, max_x))
+        y = int(np.clip(y_norm * self.canvas_size[1], 0, max_y))
+
+
+        
 
         # 4. Decode color action
         if color_idx < len(self.emoji_list):
@@ -555,6 +566,9 @@ class EmojiCompositionEnv(gym.Env):
             2: "face"       # Crop face
         }
         crop = crop_actions.get(crop_type, None)
+
+        emoji = self.emoji_list[emoji_idx]
+
 
         # 6. Package everything nicely
         decoded = {
@@ -687,9 +701,9 @@ class EmojiCompositionEnv(gym.Env):
   
 
     def _calculate_reward(self, done=False):
-        penalties = 0.0
         rewards = 0.0
-        emoji_data_by_symbol = {e["emoji"]: e for e in self.emoji_data}
+        penalties = 0.0
+
         placed = self.placed_emojis
         symbols = [e[0] for e in placed]
         counts = Counter(symbols)
@@ -697,7 +711,7 @@ class EmojiCompositionEnv(gym.Env):
         core_set = set(self.role_map.get("core", []))
         acc_set = set(self.role_map.get("accessory", []))
         color_set = set(self.role_map.get("color_reference", []))
-        background_emoji = self.background
+        emoji_data_by_symbol = {e["emoji"]: e for e in self.emoji_data}
 
         canvas_w, canvas_h = self.canvas_size
         center_x, center_y = canvas_w // 2, canvas_h // 2
@@ -709,7 +723,6 @@ class EmojiCompositionEnv(gym.Env):
         has_color_requirement = any(
             k in self.role_map.get("color_reference", []) for k in self.target_vector.keys()
         )
-        expected_placements = len(self.emoji_list) - (1 if has_color_requirement else 0)
 
         for emoji, x, y, size, layer in placed:
             entry = emoji_data_by_symbol.get(emoji)
@@ -718,73 +731,53 @@ class EmojiCompositionEnv(gym.Env):
 
             keywords = entry["fuzzy_scores"].keys()
 
-            # 🔁 Duplicate emoji penalty (scaled)
-            if counts[emoji] > 1:
-                penalties += (counts[emoji] - 1) * 1.0
-
-            # 🚫 Color emoji placed
+            # 🚫 1. Light penalty for placing a color emoji
             if emoji in color_set:
-                penalties += 2.0
+                penalties += 1.0
 
-            # 🎯 CORE
+            # 🎯 CORE EMOJI
             if any(k in core_set for k in keywords):
                 core_found = True
                 core_pos = (x, y)
                 core_colored = self.decoded_has_color(emoji, self.placed_emojis)
 
+                rewards += 2.0  # ✅ base reward for placing a core emoji
+
                 dist = np.hypot(x - center_x, y - center_y)
-                penalties += (dist / (canvas_w / 2)) * 1.0
+                if dist < 40:
+                    rewards += 1.0  # ✅ near center
 
-                ideal_size = 48
-                penalties += abs(size - ideal_size) / ideal_size * 1.0
+                if size == 48:
+                    rewards += 0.5  # ✅ ideal size
 
-                if not core_colored:
-                    penalties += 2.0
+                if layer == 1:
+                    rewards += 0.5  # ✅ correct layer
 
-                penalties += abs(layer - 1) * 0.5
+                if has_color_requirement and core_colored:
+                    rewards += 1.0  # ✅ correctly colored
 
-            # 🎯 ACCESSORY
+            # 🎯 ACCESSORY EMOJI
             if any(k in acc_set for k in keywords):
-                penalties += abs(layer - 2) * 0.3
-                penalties += max(0, (size - 48) / 48) * 0.5
+                rewards += 1.0  # ✅ base reward for placing an accessory
+
+                if size <= 48:
+                    rewards += 0.5  # ✅ small size
+
+                if layer == 2:
+                    rewards += 0.5  # ✅ correct layer
 
                 if core_pos:
                     dist = np.hypot(x - core_pos[0], y - core_pos[1])
-                    penalties += (dist / 100.0) * 0.5
-                else:
-                    penalties += 0.5
+                    if dist < 100:
+                        rewards += 0.5  # ✅ near core
 
-            # 🎯 BACKGROUND
-            if emoji == background_emoji:
-                penalties += max(0, (200 - size) / 200) * 1.0
-                penalties += abs(layer - 0) * 0.5
-
-                emoji_center_x = x + size // 2
-                emoji_center_y = y + size // 2
-                dist = np.hypot(emoji_center_x - center_x, emoji_center_y - center_y)
-                penalties += (dist / (canvas_w / 2)) * 1.0
-
+        # 🚫 2. Light penalty if core is missing
         if not core_found:
-            penalties += 3.0
-
-        if background_emoji and background_emoji not in symbols:
-            penalties += 2.0
-
-        actual_placements = len(self.placed_emojis)
-
-        # ✅ Early stop shaping
-        if done and self.step_count < self.max_steps:
-            if self._composition_is_clean():
-                rewards += 2.0
-            else:
-                penalties += 1.0
-
-        # 🎯 Placement count shaping
-        penalties += abs(actual_placements - expected_placements) * 0.5
-
-        print(f"[DEBUG] Step {self.step_count} — Reward: {round(rewards - penalties, 3)}, Penalties: {penalties}, Bonuses: {rewards}, Emojis: {len(self.placed_emojis)}")
+            penalties += 1.0
 
         return round(rewards - penalties, 3)
+
+
 
 
 
@@ -856,7 +849,7 @@ def generate_emoji_image(chromosome: list[str], role_map: dict[str, list[str]], 
 
     if TRAIN_MODEL:
         # Train the model
-        model.learn(total_timesteps=5000, progress_bar=True)  # much bigger number for real learning
+        model.learn(total_timesteps=2000, progress_bar=True)  # much bigger number for real learning
         model.save("models/emoji_agent_model")
         print("✅ Model trained and saved.")
         env.close()
@@ -886,29 +879,31 @@ def generate_emoji_image(chromosome: list[str], role_map: dict[str, list[str]], 
     for episode_idx in range(10):
         obs = test_env.reset()
         raw_env = test_env.envs[0]
-        frames = []
-        total_reward = 0.0  # Track cumulative reward
+        total_reward = 0.0
+        final_valid_image = None
 
         for step_idx in range(raw_env.max_steps):
             action, _states = model.predict(obs, deterministic=False)
             obs, reward, done, info = test_env.step(action)
 
-            reward_value = float(reward[0])  # Extract scalar
+            reward_value = float(reward[0])
             total_reward += reward_value
 
-            test_env.envs[0]._render_canvas_from_placed_emojis()
-
-            # Capture the current canvas
-            frame = Image.fromarray(obs[0])
-            frames.append(frame)
+            # Only update final image if the episode is not ending now
+            if not done:
+                raw_env._render_canvas_from_placed_emojis()
+                final_valid_image = raw_env.canvas.convert("RGB")
 
             if done:
                 break
 
-        # ✅ Draw reward on the last frame only
-        final_frame = frames[-1].copy()
-        draw = ImageDraw.Draw(final_frame)
+        # If final_valid_image was never set (episode stopped immediately), force render once
+        if final_valid_image is None:
+            raw_env._render_canvas_from_placed_emojis()
+            final_valid_image = raw_env.canvas.convert("RGB")
 
+        # Annotate reward
+        draw = ImageDraw.Draw(final_valid_image)
         try:
             font = ImageFont.truetype("arial.ttf", 16)
         except:
@@ -918,18 +913,18 @@ def generate_emoji_image(chromosome: list[str], role_map: dict[str, list[str]], 
         bbox = draw.textbbox((0, 0), text, font=font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
-        x = final_frame.width - text_w - 10
-        y = final_frame.height - text_h - 10
+        x = final_valid_image.width - text_w - 10
+        y = final_valid_image.height - text_h - 10
         draw.rectangle([x - 4, y - 2, x + text_w + 4, y + text_h + 2], fill=(0, 0, 0, 180))
         draw.text((x, y), text, fill="white", font=font)
 
-        frames[-1] = final_frame  # Replace last frame with annotated one
-
-        # Save GIF
-        frames[0].save(f"episodes/episode_{episode_idx:04d}.gif", save_all=True, append_images=frames[1:], duration=300, loop=0)
-        print(f"✅ Saved episodes/episode_{episode_idx:04d}.gif")
+        final_valid_image.save(f"episodes/episode_{episode_idx:04d}.png")
+        print(f"✅ Saved episodes/episode_{episode_idx:04d}.png")
 
     test_env.close()
+
+
+
 
 
 
