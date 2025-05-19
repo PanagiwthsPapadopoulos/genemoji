@@ -1,0 +1,11 @@
+gymnasium==0.29.1
+numpy
+pillow
+matplotlib
+opencv-python
+torch
+stable-baselines3==2.2.1
+spacy
+scipy
+tqdm
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.5.0/en_core_web_sm-3.5.0.tar.gz
